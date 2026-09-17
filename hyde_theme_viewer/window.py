@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import gi
 
@@ -27,19 +27,26 @@ def _texture_from_file(path, size) -> Gdk.Texture | None:
         return None
 
 
-def _fetch_and_cache_images(entry: ThemeEntry, remote_items: list[dict]) -> list:
+def _fetch_and_cache_images(entry: ThemeEntry, remote_items: list[dict], on_image) -> int:
     """Download (or reuse cached copies of) a list of {'name','download_url'}
-    entries, in parallel, and return the local paths that succeeded."""
+    entries in parallel, calling on_image(path) as soon as each one finishes
+    (in completion order, not submission order). Returns how many succeeded."""
     if not remote_items:
-        return []
+        return 0
 
     def _one(item):
         dest = catalog.cached_image_path(entry.name, item["download_url"])
         return catalog.download_image(item["download_url"], dest)
 
+    ok = 0
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
-        results = list(pool.map(_one, remote_items))
-    return [p for p in results if p is not None]
+        futures = [pool.submit(_one, item) for item in remote_items]
+        for future in as_completed(futures):
+            path = future.result()
+            if path is not None:
+                ok += 1
+                on_image(path)
+    return ok
 
 
 class LogDialog(Adw.Window):
@@ -96,23 +103,29 @@ class ImageFlow(Gtk.FlowBox):
         self.set_column_spacing(8)
         self._on_activate = on_activate
 
-    def set_images(self, paths) -> None:
+    def clear(self) -> None:
         child = self.get_first_child()
         while child is not None:
             nxt = child.get_next_sibling()
             self.remove(child)
             child = nxt
+
+    def add_image(self, path) -> None:
+        texture = _texture_from_file(path, THUMB_SIZE)
+        if texture is None:
+            return
+        picture = Gtk.Picture(paintable=texture)
+        picture.set_size_request(THUMB_SIZE, THUMB_SIZE)
+        picture.set_content_fit(Gtk.ContentFit.COVER)
+        button = Gtk.Button(child=picture)
+        button.add_css_class("flat")
+        button.connect("clicked", lambda _b, p=path: self._on_activate(p))
+        self.append(button)
+
+    def set_images(self, paths) -> None:
+        self.clear()
         for path in paths:
-            texture = _texture_from_file(path, THUMB_SIZE)
-            if texture is None:
-                continue
-            picture = Gtk.Picture(paintable=texture)
-            picture.set_size_request(THUMB_SIZE, THUMB_SIZE)
-            picture.set_content_fit(Gtk.ContentFit.COVER)
-            button = Gtk.Button(child=picture)
-            button.add_css_class("flat")
-            button.connect("clicked", lambda _b, p=path: self._on_activate(p))
-            self.append(button)
+            self.add_image(path)
 
 
 class ThemeRow(Gtk.Box):
@@ -212,11 +225,6 @@ class HydeThemeWindow(Adw.ApplicationWindow):
         )
         self.stack.add_named(placeholder, "placeholder")
 
-        spinner_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, spacing=8)
-        spinner_box.append(Adw.Spinner())
-        spinner_box.append(Gtk.Label(label="Fetching images from GitHub…"))
-        self.stack.add_named(spinner_box, "loading")
-
         detail_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         detail_box.set_margin_top(16)
         detail_box.set_margin_bottom(16)
@@ -311,42 +319,54 @@ class HydeThemeWindow(Adw.ApplicationWindow):
             info_bits.append(f"by {entry.owner}")
         self.info_label.set_label("  •  ".join(info_bits))
 
-        self.stack.set_visible_child_name("loading")
-        threading.Thread(target=self._fetch_theme_images, args=(entry,), daemon=True).start()
+        self.screenshot_flow.clear()
+        self.wallpaper_flow.clear()
+        self.screenshot_group.set_description("Fetching screenshots…")
+        self.wallpaper_group.set_description("Fetching wallpapers…")
+        self.stack.set_visible_child_name("detail")
 
-    def _fetch_theme_images(self, entry: ThemeEntry) -> None:
-        screenshots, screenshots_err = [], None
-        wallpapers, wallpapers_err = [], None
-        try:
-            screenshots = _fetch_and_cache_images(entry, catalog.fetch_screenshots(entry))
-        except GitHubError as exc:
-            screenshots_err = str(exc)
-        except Exception:
-            screenshots_err = traceback.format_exc()
-        try:
-            wallpapers = _fetch_and_cache_images(entry, catalog.fetch_wallpapers(entry))
-        except GitHubError as exc:
-            wallpapers_err = str(exc)
-        except Exception:
-            wallpapers_err = traceback.format_exc()
-        GLib.idle_add(
-            self._on_theme_images_ready, entry, screenshots, wallpapers, screenshots_err, wallpapers_err
-        )
+        threading.Thread(
+            target=self._fetch_image_group,
+            args=(entry, catalog.fetch_screenshots, self.screenshot_flow, self.screenshot_group, "screenshots"),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._fetch_image_group,
+            args=(entry, catalog.fetch_wallpapers, self.wallpaper_flow, self.wallpaper_group, "wallpapers"),
+            daemon=True,
+        ).start()
 
-    def _on_theme_images_ready(self, entry: ThemeEntry, screenshots, wallpapers, screenshots_err, wallpapers_err) -> bool:
+    def _fetch_image_group(
+        self, entry: ThemeEntry, fetch_listing, flow: "ImageFlow", group: Adw.PreferencesGroup, noun: str
+    ) -> None:
+        """List a theme's images from GitHub, then download them in parallel,
+        showing each one in `flow` the moment it's ready rather than waiting
+        for the whole set."""
+        error = None
+        count = 0
+        try:
+            items = fetch_listing(entry)
+            count = _fetch_and_cache_images(
+                entry, items, lambda path: GLib.idle_add(self._on_image_ready, entry, flow, path)
+            )
+        except GitHubError as exc:
+            error = str(exc)
+        except Exception:
+            error = traceback.format_exc()
+        GLib.idle_add(self._on_image_group_done, entry, group, noun, count, error)
+
+    def _on_image_ready(self, entry: ThemeEntry, flow: "ImageFlow", path) -> bool:
+        if self.selected_entry is entry:
+            flow.add_image(path)
+        return False
+
+    def _on_image_group_done(self, entry: ThemeEntry, group: Adw.PreferencesGroup, noun: str, count: int, error: str | None) -> bool:
         if self.selected_entry is not entry:
             return False
-        self.screenshot_flow.set_images(screenshots)
-        self.wallpaper_flow.set_images(wallpapers)
-        if screenshots_err:
-            self.screenshot_group.set_description(f"Couldn't fetch screenshots: {screenshots_err}")
+        if error:
+            group.set_description(f"Couldn't fetch {noun}: {error}")
         else:
-            self.screenshot_group.set_description(None if screenshots else "No screenshots found for this theme")
-        if wallpapers_err:
-            self.wallpaper_group.set_description(f"Couldn't fetch wallpapers: {wallpapers_err}")
-        else:
-            self.wallpaper_group.set_description(None if wallpapers else "No wallpapers found for this theme")
-        self.stack.set_visible_child_name("detail")
+            group.set_description(None if count else f"No {noun} found for this theme")
         return False
 
     def _open_image(self, path) -> None:
