@@ -10,7 +10,19 @@ Pulls the theme list and images from the [hyde-gallery](https://github.com/HyDE-
 - Python 3, PyGObject, GTK4, libadwaita
 - optional: `gh` CLI logged in, to avoid GitHub's low unauthenticated API rate limit
 
-## Running
+## Installing (Arch / AUR helpers)
+
+Not on the AUR yet (new account registration there is currently closed). Build and install locally instead:
+
+```
+git clone https://github.com/tatsu-t/hyde-theme-viewer.git
+cd hyde-theme-viewer/packaging/aur
+makepkg -si
+```
+
+This installs the `hyde-theme-viewer` command and a desktop entry, so it also shows up in app launchers like rofi.
+
+## Running from source
 
 ```
 python3 run.py
