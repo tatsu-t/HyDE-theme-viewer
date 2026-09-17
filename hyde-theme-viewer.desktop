@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=HyDE Theme Browser
+Name=HyDE Theme Viewer
 Comment=Browse and apply HyDE themes
 Exec=hyde-theme-viewer
 Icon=applications-graphics

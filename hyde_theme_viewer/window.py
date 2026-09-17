@@ -106,7 +106,7 @@ class ThemeRow(Gtk.Box):
 
 class HydeThemeWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application) -> None:
-        super().__init__(application=app, title="HyDE Theme Browser")
+        super().__init__(application=app, title="HyDE Theme Viewer")
         self.set_default_size(1200, 800)
 
         self.entries: list[ThemeEntry] = []
@@ -147,7 +147,7 @@ class HydeThemeWindow(Adw.ApplicationWindow):
 
         content_toolbar = Adw.ToolbarView()
         content_header = Adw.HeaderBar()
-        self.content_title = Adw.WindowTitle(title="HyDE Theme Browser")
+        self.content_title = Adw.WindowTitle(title="HyDE Theme Viewer")
         content_header.set_title_widget(self.content_title)
         self.apply_button = Gtk.Button(label="Apply this theme")
         self.apply_button.add_css_class("suggested-action")
@@ -243,7 +243,7 @@ class HydeThemeWindow(Adw.ApplicationWindow):
     def _on_row_selected(self, _listbox, row: Gtk.ListBoxRow | None) -> None:
         if row is None:
             self.apply_button.set_sensitive(False)
-            self.content_title.set_title("HyDE Theme Browser")
+            self.content_title.set_title("HyDE Theme Viewer")
             self.stack.set_visible_child_name("placeholder")
             return
         theme_row: ThemeRow = row.get_child()
