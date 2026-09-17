@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 import gi
@@ -39,6 +40,37 @@ def _fetch_and_cache_images(entry: ThemeEntry, remote_items: list[dict]) -> list
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
         results = list(pool.map(_one, remote_items))
     return [p for p in results if p is not None]
+
+
+class LogDialog(Adw.Window):
+    """A scrollable, copyable full-text log viewer -- used for anything too
+    long or too technical for a toast (subprocess output, tracebacks)."""
+
+    def __init__(self, parent: Gtk.Window, title: str, text: str) -> None:
+        super().__init__(transient_for=parent, modal=True)
+        self.set_default_size(760, 520)
+
+        buffer = Gtk.TextBuffer()
+        buffer.set_text(text or "(no output)")
+        text_view = Gtk.TextView(buffer=buffer, editable=False, monospace=True)
+        text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        text_view.set_top_margin(10)
+        text_view.set_bottom_margin(10)
+        text_view.set_left_margin(10)
+        text_view.set_right_margin(10)
+        scroller = Gtk.ScrolledWindow(child=text_view)
+
+        copy_button = Gtk.Button(icon_name="edit-copy-symbolic", tooltip_text="Copy to clipboard")
+        copy_button.connect("clicked", lambda _b: self.get_clipboard().set(text))
+
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=title))
+        header.pack_end(copy_button)
+
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_top_bar(header)
+        toolbar_view.set_content(scroller)
+        self.set_content(toolbar_view)
 
 
 class ImageDialog(Adw.Window):
@@ -140,6 +172,12 @@ class HydeThemeWindow(Adw.ApplicationWindow):
             title="Couldn't load catalog",
             icon_name="dialog-warning-symbolic",
         )
+        self._catalog_error_text = ""
+        show_log_button = Gtk.Button(label="Show details", halign=Gtk.Align.CENTER)
+        show_log_button.connect(
+            "clicked", lambda _b: LogDialog(self, "Couldn't load catalog", self._catalog_error_text).present()
+        )
+        self.sidebar_error.set_child(show_log_button)
         self.sidebar_stack.add_named(self.sidebar_error, "error")
 
         sidebar_toolbar.set_content(self.sidebar_stack)
@@ -155,6 +193,14 @@ class HydeThemeWindow(Adw.ApplicationWindow):
         self.apply_button.connect("clicked", self._on_apply_clicked)
         content_header.pack_end(self.apply_button)
         content_toolbar.add_top_bar(content_header)
+
+        self.hyde_missing = not catalog.THEME_PATCH_SH.is_file()
+        if self.hyde_missing:
+            banner = Adw.Banner(
+                title=f"HyDE not found ({catalog.THEME_PATCH_SH}) — applying a theme is disabled",
+                revealed=True,
+            )
+            content_toolbar.add_top_bar(banner)
 
         self.toast_overlay = Adw.ToastOverlay()
         self.stack = Gtk.Stack()
@@ -218,12 +264,15 @@ class HydeThemeWindow(Adw.ApplicationWindow):
             GLib.idle_add(self._on_catalog_loaded, generation, entries, None)
         except GitHubError as exc:
             GLib.idle_add(self._on_catalog_loaded, generation, None, str(exc))
+        except Exception:
+            GLib.idle_add(self._on_catalog_loaded, generation, None, traceback.format_exc())
 
     def _on_catalog_loaded(self, generation: int, entries, error: str | None) -> bool:
         if generation != self._load_generation:
             return False
         if error is not None:
-            self.sidebar_error.set_description(error)
+            self._catalog_error_text = error
+            self.sidebar_error.set_description(error.splitlines()[-1] if error else error)
             self.sidebar_stack.set_visible_child_name("error")
             return False
         self.entries = entries
@@ -249,7 +298,7 @@ class HydeThemeWindow(Adw.ApplicationWindow):
         theme_row: ThemeRow = row.get_child()
         entry = theme_row.entry
         self.selected_entry = entry
-        self.apply_button.set_sensitive(True)
+        self.apply_button.set_sensitive(not self.hyde_missing)
         self.content_title.set_title(entry.name)
         self.screenshot_group.set_title(f"Screenshots  ·  {catalog.GALLERY_REPO}/{entry.name}")
         theme_path = catalog.theme_repo_path(entry.name)
@@ -272,10 +321,14 @@ class HydeThemeWindow(Adw.ApplicationWindow):
             screenshots = _fetch_and_cache_images(entry, catalog.fetch_screenshots(entry))
         except GitHubError as exc:
             screenshots_err = str(exc)
+        except Exception:
+            screenshots_err = traceback.format_exc()
         try:
             wallpapers = _fetch_and_cache_images(entry, catalog.fetch_wallpapers(entry))
         except GitHubError as exc:
             wallpapers_err = str(exc)
+        except Exception:
+            wallpapers_err = traceback.format_exc()
         GLib.idle_add(
             self._on_theme_images_ready, entry, screenshots, wallpapers, screenshots_err, wallpapers_err
         )
@@ -326,13 +379,26 @@ class HydeThemeWindow(Adw.ApplicationWindow):
         threading.Thread(target=self._apply_theme_thread, args=(entry,), daemon=True).start()
 
     def _apply_theme_thread(self, entry: ThemeEntry) -> None:
-        ok, output = catalog.apply_theme(entry)
+        try:
+            ok, output = catalog.apply_theme(entry)
+        except Exception:
+            GLib.idle_add(self._on_apply_crashed, traceback.format_exc(), entry)
+            return
         GLib.idle_add(self._on_apply_done, ok, output, entry)
 
     def _on_apply_done(self, ok: bool, output: str, entry: ThemeEntry) -> bool:
-        self.apply_button.set_sensitive(True)
-        title = f"Applied “{entry.name}”" if ok else f"Failed to apply: {output[-120:]}"
-        self.toast_overlay.add_toast(Adw.Toast(title=title))
+        self.apply_button.set_sensitive(not self.hyde_missing)
+        if ok:
+            self.toast_overlay.add_toast(Adw.Toast(title=f"Applied “{entry.name}”"))
+        else:
+            self.toast_overlay.add_toast(Adw.Toast(title=f"Failed to apply “{entry.name}”"))
+            LogDialog(self, f"Apply failed — {entry.name}", output).present()
+        return False
+
+    def _on_apply_crashed(self, tb: str, entry: ThemeEntry) -> bool:
+        self.apply_button.set_sensitive(not self.hyde_missing)
+        self.toast_overlay.add_toast(Adw.Toast(title=f"Failed to apply “{entry.name}”"))
+        LogDialog(self, f"Apply crashed — {entry.name}", tb).present()
         return False
 
 
