@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyde-theme-viewer"
+version = "0.1.0"
+description = "Browse and apply HyDE themes from a GTK4 app"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+
+[project.scripts]
+hyde-theme-viewer = "hyde_theme_viewer.main:main"
+
+[tool.setuptools.packages.find]
+include = ["hyde_theme_viewer*"]

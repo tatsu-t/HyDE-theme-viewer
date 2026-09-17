@@ -1,0 +1,31 @@
+# Maintainer: Tatsuya Tanaka <github@tatsut.jp>
+pkgname=hyde-theme-viewer-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc="Browse and apply HyDE themes from a GTK4 app"
+arch=('any')
+url="https://github.com/tatsu-t/HyDE-theme-viewer"
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita')
+makedepends=('git' 'python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+provides=('hyde-theme-viewer')
+conflicts=('hyde-theme-viewer')
+source=("$pkgname::git+https://github.com/tatsu-t/HyDE-theme-viewer.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd "$pkgname"
+    python -m build --wheel --no-isolation
+}
+
+package() {
+    cd "$pkgname"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+    install -Dm644 hyde-theme-viewer.desktop "$pkgdir/usr/share/applications/hyde-theme-viewer.desktop"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
